@@ -74,10 +74,10 @@ The laboratory is documented across a set of markdown files in the `mzinga-apps`
 
 | Document | Contents |
 |---|---|
-| `communicationReadme.md` | Line-by-line walkthrough of the current email flow and the specific code changes needed to decouple it |
-| `SoftwareArchitecturePatternsinMZinga.md` | The full four-state evolution with pattern names, trade-offs, and code references at each step |
-| `TheStranglerFigPattern.md` | A deep dive into the Strangler Fig as the primary migration pattern, its origin, mechanics, and limitations |
-| `PatternsRelevanttotheMZingaComm.md` | The full catalogue of supporting patterns relevant across all four states, from Anti-Corruption Layer to Event Sourcing |
+| `02-architecture-evolution.md` | Line-by-line walkthrough of the current email flow and the specific code changes needed to decouple it |
+| `03-communications-email-flow.md` | The full four-state evolution with pattern names, trade-offs, and code references at each step |
+| `04-strangler-fig-pattern.md` | A deep dive into the Strangler Fig as the primary migration pattern, its origin, mechanics, and limitations |
+| `05-supporting-patterns-catalogue.md` | The full catalogue of supporting patterns relevant across all four states, from Anti-Corruption Layer to Event Sourcing |
 
 Read them in order. Each document builds on the previous one.
 
