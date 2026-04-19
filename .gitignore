@@ -9,3 +9,6 @@
 # VSCode
 .vscode/
 *.code-workspace
+
+# configuration files
+tmp/
