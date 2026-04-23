@@ -25,7 +25,7 @@ const Communications: CollectionConfig = {
   admin: {
     ...collectionUtils.GeneratePreviewConfig(),
     useAsTitle: "subject",
-    defaultColumns: ["subject", "tos"],
+    defaultColumns: ["subject", "tos", "status"],
     group: "Notifications",
     disableDuplicate: true,
     enableRichTextRelationship: false,
@@ -33,6 +33,21 @@ const Communications: CollectionConfig = {
   hooks: {
     afterChange: [
       async ({ doc }) => {
+		if (doc.status === "pending" || doc.status === "sent")
+			return doc;
+
+		// external worker -> do not send the message
+		// update status to pending
+		if (process.env.COMMUNICATIONS_EXTERNAL_WORKER === "true") {
+			await payload.update({
+				collection: Slugs.Communications,
+				id: doc.id,
+				data: { status: "pending" },
+			});
+			return doc;
+		}
+
+		// no external worker -> send email
         const { tos, ccs, bccs, subject, body } = doc;
         for (const part of body) {
           if (part.type !== "upload") {
@@ -104,6 +119,11 @@ const Communications: CollectionConfig = {
             );
           }
           await Promise.all(promises.filter((p) => Boolean(p)));
+		  await payload.update({
+				collection: Slugs.Communications,
+				id: doc.id,
+				data: { status: "sent" },
+			});
           return doc;
         } catch (err) {
           if (err.response && err.response.body && err.response.body.errors) {
@@ -127,6 +147,22 @@ const Communications: CollectionConfig = {
       name: "subject",
       type: "text",
       required: true,
+    },
+	{
+      name: "status",
+      type: "select",
+	//   defaultValue: null,
+    //   required: true, // do not set as required
+	  options: [
+		{label: "pending", value: "pending"},
+		{label: "processing", value: "processing"},
+		{label: "sent", value: "sent"},
+		{label: "failed", value: "failed"}
+	  ],
+		admin: {
+		readOnly: true,
+		position: "sidebar",
+		}
     },
     {
       name: "tos",
