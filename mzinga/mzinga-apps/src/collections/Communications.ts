@@ -18,9 +18,10 @@ const Communications: CollectionConfig = {
     delete: () => {
       return false;
     },
-    update: () => {
-      return false;
-    },
+    // update: () => {
+    //   return false;
+    // },
+	update: access.GetIsAdmin
   },
   admin: {
     ...collectionUtils.GeneratePreviewConfig(),
