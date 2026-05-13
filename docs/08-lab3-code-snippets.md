@@ -51,10 +51,11 @@ cd lab3-worker-observable
 requests==2.32.3
 python-dotenv==1.0.1
 structlog==24.4.0
-opentelemetry-sdk==1.27.0
-opentelemetry-exporter-otlp-proto-http==1.27.0
-opentelemetry-instrumentation-requests==0.48b0
-opentelemetry-exporter-prometheus==0.48b0
+prometheus-client==0.25.0
+opentelemetry-sdk==1.30.0
+opentelemetry-exporter-otlp-proto-http==1.30.0
+opentelemetry-instrumentation-requests==0.51b0
+opentelemetry-exporter-prometheus==0.51b0
 ```
 
 ---
@@ -100,8 +101,7 @@ from opentelemetry.instrumentation.requests import RequestsInstrumentor
 # OpenTelemetry — metrics
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from opentelemetry.exporter.prometheus import PrometheusMetricExporter
+from opentelemetry.exporter.prometheus import PrometheusMetricReader  # <-- Updated import
 from prometheus_client import start_http_server
 
 load_dotenv()
@@ -137,9 +137,11 @@ tracer = trace.get_tracer(SERVICE_NAME_VALUE)
 
 # ── OpenTelemetry: Metrics ────────────────────────────────────────────────────
 
+# 1. Start the HTTP server to expose the /metrics endpoint for Prometheus to scrape
 start_http_server(port=PROMETHEUS_PORT)
-prometheus_exporter = PrometheusMetricExporter()
-metric_reader = PeriodicExportingMetricReader(prometheus_exporter, export_interval_millis=5000)
+
+# 2. Use PrometheusMetricReader (Pull-based) instead of PeriodicExportingMetricReader
+metric_reader = PrometheusMetricReader()
 meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
 metrics.set_meter_provider(meter_provider)
 
