@@ -15,6 +15,11 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from prometheus_client import start_http_server
+
 load_dotenv()
 
 
@@ -29,6 +34,7 @@ MZINGA_EMAIL = os.getenv("MZINGA_EMAIL")
 MZINGA_PASSWORD = os.getenv("MZINGA_PASSWORD")
 SERVICE_NAME_VALUE = os.getenv("OTEL_SERVICE_NAME", "email-worker")
 OTLP_EXPORTER_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
+PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", 8000))
 
 # configure open telemetry for tracing
 resource = Resource(attributes={
@@ -44,13 +50,44 @@ trace.set_tracer_provider(tracer_provider)
 RequestsInstrumentor().instrument()
 tracer = trace.get_tracer(SERVICE_NAME_VALUE)
 
-# configure logging
+# configure open telemetry custom metrics
 
-# old logging (not structured)
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-# log = logging.getLogger(__name__)
+# 1. Start the HTTP server to expose the /metrics endpoint for Prometheus to scrape
+start_http_server(port=PROMETHEUS_PORT)
 
-# json logging
+# 2. Use PrometheusMetricReader (Pull-based) instead of PeriodicExportingMetricReader
+metric_reader = PrometheusMetricReader()
+meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+metrics.set_meter_provider(meter_provider)
+
+meter = metrics.get_meter(SERVICE_NAME_VALUE)
+
+# 3. Define metric
+emails_processed = meter.create_counter(
+	"emails_processed_total",
+	"1",
+	"Total number of processed emails"
+)
+
+worker_poll = meter.create_counter(
+	"worker_poll_total",
+	"1",
+	"Total number of poll cycles performed"
+) 
+
+email_processing_time = meter.create_histogram(
+	"email_processing_duration_seconds",
+	"s",
+	"Duration of each process communication span"
+)
+
+smtp_send_time = meter.create_histogram(
+	"smtp_send_duration_seconds",
+	"s",
+	"Duration of each smtp send operation"
+)
+
+# configure structured (json) logging
 
 def add_otel_context(logger, method, event_dict):
     """Inject active trace_id and span_id into every log entry."""
@@ -129,9 +166,12 @@ def send_email(to_addresses: list[str], subject: str, html: str,
 	all_recipients = to_addresses + (cc_addresses or []) + (bcc_addresses or [])
 	# wrap smtp send with a send_email span (# of recipients is an attribute)
 	with tracer.start_as_current_span("send_email") as span:
+		start_time = time.perf_counter()
 		span.set_attribute("recipient_count", len(all_recipients))
 		with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
 			server.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
+		end_time = time.perf_counter()
+		smtp_send_time.record(end_time - start_time)
 
 
 def process(doc: dict, token: str):
@@ -140,6 +180,8 @@ def process(doc: dict, token: str):
 	fails, the communication status is set to "failed"'''
 
 	with tracer.start_as_current_span("process_communication") as span:
+		start_time = time.perf_counter()
+
 		doc_id = doc["id"]
 		span.set_attribute("doc_id", doc_id)
 
@@ -158,10 +200,18 @@ def process(doc: dict, token: str):
 			send_email(to_emails, doc["subject"], html, cc_emails, bcc_emails)
 			update_comm_status(token, doc_id, "sent")
 			log.info(f"Communication {doc_id} sent successfully")
-			log.info(f"Communication {doc_id} sent successfully")
+			span.set_attribute("status", "OK")
+			span.set_status(trace.StatusCode.OK)
+			recipients_count = len(to_emails) + len(cc_emails) + len(bcc_emails)
+			emails_processed.add(1, {"status": "sent", "recipient_count": f"{recipients_count}"})
+			end_time = time.perf_counter()
+			email_processing_time.record(end_time - start_time)
+
 		except Exception as e:
-			log.error(f"Failed to process communication {doc_id}: {e}")
 			update_comm_status(token, doc_id, "failed")
+			emails_processed.add(1, {"status": "failed"})
+			span.set_status(trace.StatusCode.ERROR, str(e))
+			log.error(f"Failed to process communication: {e}")
 		finally:
 			# remove doc id from next logs
 			structlog.contextvars.unbind_contextvars("doc_id")
@@ -214,6 +264,8 @@ def poll(token):
 	log.info(f"Worker started. Polling every {POLL_INTERVAL}s")
 	while True:
 		docs = get_pending_comms(token)
+		found = "found" if len(docs) > 0 else "empty"
+		worker_poll.add(1, {"result": f"{found}"})
 		if docs:
 			for doc in docs:
 				process(doc, token)
