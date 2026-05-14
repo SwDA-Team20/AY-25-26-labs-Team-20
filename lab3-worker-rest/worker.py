@@ -8,9 +8,16 @@ from dotenv import load_dotenv
 import requests
 import structlog
 
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+
 load_dotenv()
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-# log = logging.getLogger(__name__)
+
+
 
 # configure enviroment constants
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", 5))
@@ -21,27 +28,45 @@ MZINGA_URL = os.getenv("MZINGA_URL")
 MZINGA_EMAIL = os.getenv("MZINGA_EMAIL")
 MZINGA_PASSWORD = os.getenv("MZINGA_PASSWORD")
 SERVICE_NAME_VALUE = os.getenv("OTEL_SERVICE_NAME", "email-worker")
+OTLP_EXPORTER_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
 
+# configure open telemetry for tracing
+resource = Resource(attributes={
+    SERVICE_NAME: SERVICE_NAME_VALUE,
+    SERVICE_VERSION: "1.0.0",
+})
 
+tracer_provider = TracerProvider(resource=resource)
+otlp_exporter = OTLPSpanExporter(endpoint=f"{OTLP_EXPORTER_ENDPOINT}")
+tracer_provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+trace.set_tracer_provider(tracer_provider)
+
+RequestsInstrumentor().instrument()
+tracer = trace.get_tracer(SERVICE_NAME_VALUE)
 
 # configure logging
 
+# old logging (not structured)
+# logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# log = logging.getLogger(__name__)
 
-# def add_otel_context(logger, method, event_dict):
-#     """Inject active trace_id and span_id into every log entry."""
-#     span = trace.get_current_span()
-#     ctx = span.get_span_context()
-#     if ctx.is_valid:
-#         event_dict["trace_id"] = format(ctx.trace_id, "032x")
-#         event_dict["span_id"] = format(ctx.span_id, "016x")
-#     return event_dict
+# json logging
+
+def add_otel_context(logger, method, event_dict):
+    """Inject active trace_id and span_id into every log entry."""
+    span = trace.get_current_span()
+    ctx = span.get_span_context()
+    if ctx.is_valid:
+        event_dict["trace_id"] = format(ctx.trace_id, "032x")
+        event_dict["span_id"] = format(ctx.span_id, "016x")
+    return event_dict
 
 structlog.configure(
     processors=[
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
-        # add_otel_context,
+        add_otel_context, # add context from current open telemetry trace and span
         structlog.processors.JSONRenderer(),
     ],
     wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -54,31 +79,35 @@ log = structlog.get_logger(service=SERVICE_NAME_VALUE)
 # communication handling
 def slate_to_html(nodes: list) -> str:
 	"""Minimal Slate AST → HTML serialiser."""
-	html = ""
-	for node in nodes or []:
-		if node.get("type") == "paragraph":
-			html += f"<p>{slate_to_html(node.get('children', []))}</p>"
-		elif node.get("type") == "h1":
-			html += f"<h1>{slate_to_html(node.get('children', []))}</h1>"
-		elif node.get("type") == "h2":
-			html += f"<h2>{slate_to_html(node.get('children', []))}</h2>"
-		elif node.get("type") == "ul":
-			html += f"<ul>{slate_to_html(node.get('children', []))}</ul>"
-		elif node.get("type") == "li":
-			html += f"<li>{slate_to_html(node.get('children', []))}</li>"
-		elif node.get("type") == "link":
-			url = node.get("url", "#")
-			html += f'<a href="{url}">{slate_to_html(node.get("children", []))}</a>'
-		elif "text" in node:
-			text = node["text"]
-			if node.get("bold"):
-				text = f"<strong>{text}</strong>"
-			if node.get("italic"):
-				text = f"<em>{text}</em>"
-			html += text
-		else:
-			html += slate_to_html(node.get("children", []))
-	return html
+	# span wrapping the entire method call, with nodes count as attributes
+	with tracer.start_as_current_span("serialize_body") as span:
+		span.set_attribute("node_count", len(nodes))
+
+		html = ""
+		for node in nodes or []:
+			if node.get("type") == "paragraph":
+				html += f"<p>{slate_to_html(node.get('children', []))}</p>"
+			elif node.get("type") == "h1":
+				html += f"<h1>{slate_to_html(node.get('children', []))}</h1>"
+			elif node.get("type") == "h2":
+				html += f"<h2>{slate_to_html(node.get('children', []))}</h2>"
+			elif node.get("type") == "ul":
+				html += f"<ul>{slate_to_html(node.get('children', []))}</ul>"
+			elif node.get("type") == "li":
+				html += f"<li>{slate_to_html(node.get('children', []))}</li>"
+			elif node.get("type") == "link":
+				url = node.get("url", "#")
+				html += f'<a href="{url}">{slate_to_html(node.get("children", []))}</a>'
+			elif "text" in node:
+				text = node["text"]
+				if node.get("bold"):
+					text = f"<strong>{text}</strong>"
+				if node.get("italic"):
+					text = f"<em>{text}</em>"
+				html += text
+			else:
+				html += slate_to_html(node.get("children", []))
+		return html
 
 
 def resolve_emails(recipients_list: list) -> list[str]:
@@ -98,8 +127,11 @@ def send_email(to_addresses: list[str], subject: str, html: str,
 		msg["Cc"] = ", ".join(cc_addresses)
 	msg.attach(MIMEText(html, "html"))
 	all_recipients = to_addresses + (cc_addresses or []) + (bcc_addresses or [])
-	with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-		server.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
+	# wrap smtp send with a send_email span (# of recipients is an attribute)
+	with tracer.start_as_current_span("send_email") as span:
+		span.set_attribute("recipient_count", len(all_recipients))
+		with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+			server.sendmail(EMAIL_FROM, all_recipients, msg.as_string())
 
 
 def process(doc: dict, token: str):
@@ -107,27 +139,32 @@ def process(doc: dict, token: str):
 	after resolving all recipients, the communication is sent and its status is updated to "sent". If any step
 	fails, the communication status is set to "failed"'''
 
-	doc_id = doc["id"]
-	# adds doc id to next logs
-	structlog.contextvars.bind_contextvars(doc_id=doc_id)
-	update_comm_status(token, doc_id, "processing")
-	try:
-		to_emails = resolve_emails(doc.get("tos") or [])
-		if not to_emails:
-			raise ValueError("No valid 'to' email addresses found")
-		cc_emails = resolve_emails(doc.get("ccs") or [])
-		bcc_emails = resolve_emails(doc.get("bccs") or [])
-		html = slate_to_html(doc.get("body") or [])
-		send_email(to_emails, doc["subject"], html, cc_emails, bcc_emails)
-		update_comm_status(token, doc_id, "sent")
-		log.info(f"Communication {doc_id} sent successfully")
-		log.info(f"Communication {doc_id} sent successfully")
-	except Exception as e:
-		log.error(f"Failed to process communication {doc_id}: {e}")
-		update_comm_status(token, doc_id, "failed")
-	finally:
-		# remove doc id from next logs
-		structlog.contextvars.unbind_contextvars("doc_id")
+	with tracer.start_as_current_span("process_communication") as span:
+		doc_id = doc["id"]
+		span.set_attribute("doc_id", doc_id)
+
+		# adds doc id to next logs
+		structlog.contextvars.bind_contextvars(doc_id=doc_id)
+
+		# actual process of communication
+		update_comm_status(token, doc_id, "processing")
+		try:
+			to_emails = resolve_emails(doc.get("tos") or [])
+			if not to_emails:
+				raise ValueError("No valid 'to' email addresses found")
+			cc_emails = resolve_emails(doc.get("ccs") or [])
+			bcc_emails = resolve_emails(doc.get("bccs") or [])
+			html = slate_to_html(doc.get("body") or [])
+			send_email(to_emails, doc["subject"], html, cc_emails, bcc_emails)
+			update_comm_status(token, doc_id, "sent")
+			log.info(f"Communication {doc_id} sent successfully")
+			log.info(f"Communication {doc_id} sent successfully")
+		except Exception as e:
+			log.error(f"Failed to process communication {doc_id}: {e}")
+			update_comm_status(token, doc_id, "failed")
+		finally:
+			# remove doc id from next logs
+			structlog.contextvars.unbind_contextvars("doc_id")
 
 
 

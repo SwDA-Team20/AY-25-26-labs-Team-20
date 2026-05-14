@@ -2,3 +2,6 @@ pymongo
 python-dotenv
 requests
 structlog
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-instrumentation-requests
