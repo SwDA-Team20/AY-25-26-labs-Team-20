@@ -5,16 +5,12 @@ import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from bson import ObjectId
 import requests
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-client = MongoClient(os.environ["MONGODB_URI"])
-db = client.get_default_database()
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", 5))
 SMTP_HOST = os.getenv("SMTP_HOST", "localhost")
@@ -55,12 +51,9 @@ def slate_to_html(nodes: list) -> str:
 
 
 def resolve_emails(recipients_list: list) -> list[str]:
-#     """Resolve Payload relationship references to email addresses."""
-#     if not relationship_list:
-#         return []
-#     ids = [ObjectId(r["value"]) for r in relationship_list if r.get("value")]
-#     users = db.users.find({"_id": {"$in": ids}}, {"email": 1})
-#     return [u["email"] for u in users if u.get("email")]
+	'''Resolve Payload relationship references to email addresses'''
+	# when using depth=1 in the mzinga api request, the recipients are already resolved
+	# and can be found inside the json at value.email
 	return [recipient["value"]["email"] for recipient in recipients_list]
 
 
@@ -79,9 +72,12 @@ def send_email(to_addresses: list[str], subject: str, html: str,
 
 
 def process(doc: dict, token: str):
+	'''Tries to process the given communication. The stats is immediatly updated to "processing", then
+	after resolving all recipients, the communication is sent and its status is updated to "sent". If any step
+	fails, the communication status is set to "failed"'''
+
 	doc_id = doc["id"]
 	log.info(f"Processing communication {doc_id}")
-	# db.communications.update_one({"_id": doc_id}, {"$set": {"status": "processing"}})
 	update_comm_status(token, doc_id, "processing")
 	try:
 		to_emails = resolve_emails(doc.get("tos") or [])
@@ -91,18 +87,16 @@ def process(doc: dict, token: str):
 		bcc_emails = resolve_emails(doc.get("bccs") or [])
 		html = slate_to_html(doc.get("body") or [])
 		send_email(to_emails, doc["subject"], html, cc_emails, bcc_emails)
-		# db.communications.update_one({"_id": doc_id}, {"$set": {"status": "sent"}})
 		update_comm_status(token, doc_id, "sent")
 		log.info(f"Communication {doc_id} sent successfully")
 	except Exception as e:
 		log.error(f"Failed to process communication {doc_id}: {e}")
-		# db.communications.update_one({"_id": doc_id}, {"$set": {"status": "failed"}})
 		update_comm_status(token, doc_id, "failed")
 
 
+
 def get_auth_token():
-	print("Login json:", {"email": MZINGA_EMAIL, "password": MZINGA_PASSWORD})
-	print("Login url:", f"{MZINGA_URL}/api/users/login")
+	'''Authenticate to the login api with the admin credentials to get the authentication token'''
 
 	resp = requests.post(
 		f"{MZINGA_URL}/api/users/login",
@@ -116,10 +110,12 @@ def get_auth_token():
 
 
 def get_auth_headers(token):
+	'''Helper function to generate header in the correct format to hold authentication token'''
 	return {"Authorization": f"Bearer {token}"}
 
 
 def update_comm_status(token, comm_id, status):
+	'''Updates the given communication status with the provided one (requires authentication token)'''
 	resp = requests.patch(
 		f"{MZINGA_URL}/api/communications/{comm_id}",
 		json={"status": status},
@@ -129,6 +125,7 @@ def update_comm_status(token, comm_id, status):
 
 
 def get_pending_comms(token):
+	'''Fetches all the communications that have a status set to "pending"'''
 	resp = requests.get(
 		f"{MZINGA_URL}/api/communications",
 		params={"where[status][equals]": "pending", "depth": 1},
@@ -141,7 +138,6 @@ def get_pending_comms(token):
 def poll(token):
 	log.info(f"Worker started. Polling every {POLL_INTERVAL}s")
 	while True:
-		# doc = db.communications.find_one({"status": "pending"})
 		docs = get_pending_comms(token)
 		if docs:
 			for doc in docs:
