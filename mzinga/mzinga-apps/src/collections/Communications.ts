@@ -40,6 +40,11 @@ const Communications: CollectionConfig = {
 		// external worker -> do not send the message
 		// update status to pending
 		if (process.env.COMMUNICATIONS_EXTERNAL_WORKER === "true") {
+			// IMPORTANT: if status has already been set, no need to update the status again
+			// if this is missing, every processing or failed communication gets back into pending state
+			if (doc.status != null)
+				return doc;
+
 			await payload.update({
 				collection: Slugs.Communications,
 				id: doc.id,
