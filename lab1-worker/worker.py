@@ -102,5 +102,9 @@ def poll():
             time.sleep(POLL_INTERVAL)
 
 
+def delete_all_comms():
+    db.communications.delete_many({})
+
+
 if __name__ == "__main__":
     poll()
