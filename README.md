@@ -23,6 +23,7 @@ Read in order — each document builds on the previous one.
 | 9b | [Minikube Setup](docs/09b-minikube-setup.md) | Install and run minikube on macOS, Linux, Windows WSL, and Windows native (assumes Docker already installed) |
 | 9c | [Docker Setup](docs/09c-docker-setup.md) | Install Docker Engine or Docker Desktop on macOS, Linux, Windows WSL, and Windows native — reference if Docker is not already present |
 | 9d | [Helm Charts](docs/09d-helm-charts.md) | From plain Kubernetes YAML to Helm: parameterisation, release tracking, application-level rollback, multi-component applications, and deploying MZinga with the official Helm chart |
+| 9e | [Kubernetes UI Tools](docs/09e-k8s-ui-tools.md) | K9s (terminal UI) and OpenLens (desktop GUI) — installation on macOS, Linux, and Windows, and how to use them to observe deployments in this lab |
 | 9 | [Lab 4 Step by Step](docs/09-lab4-step-by-step.md) | Deployment models: in-place rolling update, blue-green deployment, and canary release with Kubernetes |
 | 9c | [Lab 4 Code Snippets](docs/09-lab4-code-snippets.md) | All Kubernetes manifests, Dockerfile, and commands for all three deployment strategies |
 | 10 | [Conclusion](docs/10-conclusion.md) | The full journey across all four labs: how each architectural transition constrained the deployment strategy, why Recreate was mandatory for the v1→v2 worker switch, how RabbitMQ unlocks safe horizontal scaling, and a complete deployment timeline |

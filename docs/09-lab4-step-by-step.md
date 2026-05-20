@@ -11,7 +11,6 @@ This lab operates independently of the MZinga infrastructure. It uses a minimal 
 - Minikube installed and running — see [09b — Minikube Setup](09b-minikube-setup.md)
 - Docker installed and accessible from the terminal
 - `kubectl` installed and configured to talk to the minikube cluster (`kubectl get nodes` should return the minikube node as `Ready`)
-- The `lab4-k8s/` folder from this repository
 
 ---
 
@@ -36,15 +35,67 @@ These simulate a real before/after upgrade scenario.
 
 ## Step 1 — Build the Container Images
 
-### 1.1 — Build v1 and v2
+Create the required folder and move into the folder.
+
+**macOS / Linux / WSL:**
+
+```sh
+mkdir -p mzinga/lab4-k8s
+cd mzinga/lab4-k8s
+```
+
+**Windows PowerShell:**
+
+```powershell
+New-Item -ItemType Directory -Force -Path mzinga\lab4-k8s
+cd mzinga\lab4-k8s
+```
+
+### 1.1 — Create a Python script to satisfy the requirements
+
+Create a file named `app.py` inside `mzinga/lab4-k8s/`. The script must implement a minimal HTTP server with two endpoints:
+
+**`GET /`** — returns a JSON response containing three fields: the application version, the application colour, and the hostname of the machine handling the request. Version and colour are read from environment variables (`APP_VERSION` and `APP_COLOR`). The hostname is retrieved programmatically at runtime — Python's standard library exposes a function for this in the `socket` module.
+
+**`GET /health`** — returns a JSON response with a single field indicating the service is healthy. This endpoint is called by Kubernetes every few seconds to decide whether the Pod is ready to receive traffic and whether it is still alive. It must always return HTTP 200 as long as the process is running correctly.
+
+Technical aspects to consider:
+
+- **Standard library only.** Python ships with an `http.server` module that is sufficient for this purpose. Avoid adding Flask or any external framework — the Dockerfile should not need to install dependencies, which keeps the image small and the build fast.
+- **Reading environment variables.** Use `os.getenv` to read `APP_VERSION` and `APP_COLOR`. Provide sensible defaults (for example `"1.0.0"` and `"blue"`) so the script works even if the variables are absent.
+- **JSON responses.** The `json` module (standard library) serialises Python dicts to JSON strings. The HTTP response must include the `Content-Type: application/json` header so clients parse it correctly.
+- **HTTP status codes.** Both endpoints should return status `200 OK`. Any other status code on `/health` will cause Kubernetes to mark the Pod as not ready.
+- **Hostname.** In a container environment, `socket.gethostname()` returns the container's hostname, which Kubernetes sets to the Pod name. This is how the lab makes it visible which Pod handled each request during canary and rolling experiments.
+
+> If you need working code to compare against, the full implementation is in [09-lab4-code-snippets.md](09-lab4-code-snippets.md).
+
+### 1.2 — Create a Dockerfile to build the image
+
+Create a file named `Dockerfile` in the same `mzinga/lab4-k8s/` directory. The Dockerfile must produce an image that runs `app.py` and embeds the version and colour values so that building with different arguments produces observably different containers.
+
+Requirements:
+
+- The same Dockerfile must produce both the `1.0.0 / blue` image and the `2.0.0 / green` image. The version and colour values are passed in at build time, not hard-coded in the file.
+- The image must expose the port the HTTP server listens on.
+- The container must start the Python script automatically when it runs — no manual command needed.
+
+Technical aspects to consider:
+
+- **`ARG` vs `ENV`.** Docker `ARG` declares a build-time variable that is available only during the image build (in `RUN`, `COPY`, and similar instructions). `ENV` declares a variable that persists into the running container and is visible to the process via `os.getenv`. To pass a build argument through to the running container you must transfer it explicitly: `ENV VARIABLE=${BUILD_ARG}`. If you only declare `ARG APP_VERSION`, the Python process will not see `APP_VERSION` at runtime.
+- **Base image.** Use `python:3.12-slim` as the base. The full `python:3.12` image is several hundred megabytes larger without offering anything useful for this lab. Avoid Alpine (`python:3.12-alpine`) — it uses musl libc which can cause unexpected behaviour with some Python packages.
+- **No dependencies to install.** Because `app.py` uses only the standard library, there is no `requirements.txt` and no `pip install` step. The Dockerfile is short: choose the base image, set the working directory, copy the script, declare the build arguments, set the environment variables, expose the port, and set the entrypoint.
+- **Layer caching.** Docker caches each instruction as a layer. Instructions that change rarely (base image selection, working directory) should come before instructions that change often (copying source code). For a single-file project this is a minor concern, but the habit matters for larger images.
+- **`EXPOSE`.** The `EXPOSE` instruction documents which port the container listens on. It does not publish the port — that is controlled by Kubernetes Services. Documenting it in the Dockerfile makes the intent visible and is required for some tooling to detect the port automatically.
+
+> If you need a working Dockerfile to compare against, it is in [09-lab4-code-snippets.md](09-lab4-code-snippets.md).
+
+### 1.3 — Build v1 and v2
 
 All commands below run from the `mzinga/lab4-k8s/` directory.
 
 **macOS / Linux / WSL:**
 
 ```sh
-cd mzinga/lab4-k8s
-
 docker build \
   --build-arg APP_VERSION=1.0.0 \
   --build-arg APP_COLOR=blue \
@@ -59,8 +110,6 @@ docker build \
 **Windows PowerShell:**
 
 ```powershell
-cd mzinga\lab4-k8s
-
 docker build `
   --build-arg APP_VERSION=1.0.0 `
   --build-arg APP_COLOR=blue `
@@ -72,7 +121,7 @@ docker build `
   -t mzinga-webapp:2.0.0 .
 ```
 
-### 1.2 — Load the Images into Minikube
+### 1.4 — Load the Images into Minikube
 
 Minikube runs inside a separate container or VM and does not share the host Docker image cache. You must explicitly load locally built images into it.
 
@@ -105,15 +154,29 @@ docker.io/library/mzinga-webapp:2.0.0
 
 > **Why `imagePullPolicy: Never`?** The Kubernetes manifests in this lab set `imagePullPolicy: Never` on all containers. This tells Kubernetes to use the image already present in the node's local cache (loaded via `minikube image load`) rather than trying to pull it from a registry. Without this setting, Kubernetes would attempt to pull from Docker Hub and fail because these images are not published there.
 
-### 1.3 — Create the Namespace
+### 1.5 — Create the Namespace
+
+Create a folder named `k8s/` inside `mzinga/lab4-k8s/`. Inside it, create a file named `namespace.yaml`.
+
+A Namespace is a Kubernetes resource that creates a logical partition within the cluster. All resources in this lab — Deployments, Services, Pods — will be created inside this namespace, keeping them isolated from anything else running on the minikube cluster.
+
+Requirements:
+
+- The file must declare a Kubernetes `Namespace` resource named `mzinga-lab4`.
+- This is the name all subsequent `kubectl` commands in this lab will reference with `-n mzinga-lab4`.
+
+Technical aspects to consider:
+
+- Every Kubernetes manifest requires at minimum four top-level fields: `apiVersion`, `kind`, `metadata`, and usually `spec`. A `Namespace` is one of the few resource types that requires no `spec` — the name is the entire definition.
+- Core Kubernetes resource types (`Namespace`, `Service`, `Pod`, `ConfigMap`) use `apiVersion: v1`. Workload resources like `Deployment` belong to the `apps` group and use `apiVersion: apps/v1`.
+- The `metadata.name` field is the canonical identifier for any Kubernetes resource. For a Namespace, it becomes the namespace name used in every `-n` flag throughout the lab.
+
+> If you need the YAML to compare against, it is in [09-lab4-code-snippets.md](09-lab4-code-snippets.md).
+
+Once the file is ready, apply it and verify:
 
 ```sh
 kubectl apply -f k8s/namespace.yaml
-```
-
-Verify:
-
-```sh
 kubectl get namespace mzinga-lab4
 ```
 
@@ -123,7 +186,50 @@ kubectl get namespace mzinga-lab4
 
 Before practising upgrade strategies, establish the baseline: v1 running and healthy.
 
-### 2.1 — Apply the Rolling Deployment Manifests
+### 2.1 — Create the Rolling Manifests
+
+Create a directory `k8s/rolling/` and create two YAML files inside it.
+
+**`service.yaml`**
+
+A Service is the stable network endpoint in front of the Pods. Pods are ephemeral — their IP addresses change every time they restart — but the Service IP is stable. Clients connect to the Service, not to individual Pods.
+
+Requirements:
+
+- Kind: `Service`
+- A selector that matches the label(s) assigned to Pods by the Deployment
+- A port mapping: the Service listens on port `80` and forwards traffic to port `8080` on each Pod (the port `app.py` listens on)
+
+Technical aspects to consider:
+
+- `spec.selector` is how a Service finds its Pods. Any Pod in the same namespace that carries all the listed labels is included in the Service's endpoint list. The key-value pairs here must match exactly what the Deployment places on its Pod template.
+- `spec.ports[].port` is the port clients connect to on the Service. `spec.ports[].targetPort` is the port on the container. These can differ — here the Service exposes port 80 while the application uses 8080.
+- The default Service type is `ClusterIP`, which makes the Service reachable only within the cluster. This is correct for this lab — external access is handled by `kubectl port-forward`.
+
+**`deployment-v1.yaml`**
+
+A Deployment declares the desired state for a set of identical Pods and manages their lifecycle — creating, replacing, and scaling Pods to match the declared spec.
+
+Requirements:
+
+- Kind: `Deployment`, in the `mzinga-lab4` namespace
+- 3 replicas using image `mzinga-webapp:1.0.0` with `imagePullPolicy: Never`
+- Environment variables `APP_VERSION: "1.0.0"` and `APP_COLOR: "blue"` injected into the container
+- Rolling update strategy with `maxUnavailable: 1` and `maxSurge: 1`
+- A readiness probe on `GET /health` — Kubernetes routes traffic to a Pod only once this probe passes
+- A liveness probe on `GET /health` — Kubernetes restarts a Pod if this probe begins failing
+- Pod labels that match the selector defined in `service.yaml`
+
+Technical aspects to consider:
+
+- `spec.selector.matchLabels` and `spec.template.metadata.labels` must be identical — this is how the Deployment knows which Pods it owns. The Service's `spec.selector` must also reference the same labels.
+- The readiness and liveness probes both use `httpGet` against `/health` on the container port (8080). `initialDelaySeconds` gives the container time to start before Kubernetes begins probing; `periodSeconds` controls the check frequency.
+- `spec.strategy.type: RollingUpdate` with `rollingUpdate.maxUnavailable` and `rollingUpdate.maxSurge` controls how many Pods may be unavailable or in excess during the update. Setting `maxUnavailable: 1` means no more than one Pod is down at any moment; `maxSurge: 1` means one extra Pod is created before an old one is removed.
+- `imagePullPolicy: Never` must be set explicitly on every container in this lab (see the note above in step 1.4).
+
+> If you need the YAML to compare against, both files are in [09-lab4-code-snippets.md](09-lab4-code-snippets.md).
+
+Once both files are ready, apply them:
 
 ```sh
 kubectl apply -f k8s/rolling/service.yaml
@@ -222,9 +328,25 @@ You should see lines like:
 1.0.0 webapp-7d8b6c9f4-ghi56
 ```
 
-### 3.2 — Trigger the Rolling Update
+### 3.2 — Create the v2 Deployment and Trigger the Rolling Update
 
-Apply the v2 Deployment manifest:
+Create `deployment-v2.yaml` in the same `k8s/rolling/` directory.
+
+This manifest has the same structure as `deployment-v1.yaml`. The only differences are the image tag and the environment variable values:
+
+- Image tag: `mzinga-webapp:2.0.0`
+- `APP_VERSION`: `"2.0.0"`
+- `APP_COLOR`: `"green"`
+- `metadata.name` must be **identical** to `deployment-v1.yaml`
+
+Technical aspects to consider:
+
+- When you apply a Deployment manifest whose name already exists in the namespace, Kubernetes updates the existing Deployment's spec rather than creating a second one. If the Pod template changed (image tag, env var), Kubernetes creates a new ReplicaSet and begins replacing Pods according to the rollout strategy configured in the manifest.
+- Keeping the same Deployment name is what triggers the update. If you accidentally use a different name, you will create a second independent Deployment rather than upgrading the first.
+
+> The file is in [09-lab4-code-snippets.md](09-lab4-code-snippets.md) if you need it.
+
+Once the file is ready, apply it:
 
 ```sh
 kubectl apply -f k8s/rolling/deployment-v2.yaml
@@ -337,7 +459,32 @@ pkill -f "kubectl port-forward"
 Stop-Job -Name *
 ```
 
-### 4.2 — Deploy v1 with the Recreate Strategy
+### 4.2 — Create the Recreate Manifests and Deploy v1
+
+Create a directory `k8s/recreate/` and create two YAML files inside it.
+
+**`service.yaml`**
+
+The Service for the Recreate scenario is functionally identical to `k8s/rolling/service.yaml` — same selector, same port mapping. You may copy it directly.
+
+**`deployment-v1.yaml`**
+
+This Deployment is structurally the same as `k8s/rolling/deployment-v1.yaml` with one critical difference: the update strategy.
+
+Requirements:
+
+- Same image (`mzinga-webapp:1.0.0`), replicas (3), namespace, environment variables, probes, and pod labels as the rolling v1 Deployment
+- `metadata.name` must be `webapp` — the same name used in all other steps
+- Strategy must be `type: Recreate`
+
+Technical aspects to consider:
+
+- `strategy.type: Recreate` requires no additional fields. Unlike `RollingUpdate`, there is no `rollingUpdate` stanza — the strategy type itself is the entire configuration.
+- When this Deployment is updated, Kubernetes terminates all existing Pods before creating any new ones. There is no overlap period, which is why the service goes offline during the transition.
+
+> The files are in [09-lab4-code-snippets.md](09-lab4-code-snippets.md) if you need them.
+
+Once both files are ready, apply them and verify v1 is serving:
 
 ```sh
 kubectl apply -f k8s/recreate/service.yaml
@@ -386,7 +533,17 @@ while ($true) {
 }
 ```
 
-### 4.4 — Trigger the Update and Observe the Downtime
+### 4.4 — Create the v2 Recreate Deployment and Observe the Downtime
+
+Create `deployment-v2.yaml` in `k8s/recreate/`.
+
+Requirements:
+
+- Same structure as `k8s/recreate/deployment-v1.yaml` — including `strategy.type: Recreate`
+- Updated image tag (`mzinga-webapp:2.0.0`), `APP_VERSION` (`"2.0.0"`), and `APP_COLOR` (`"green"`)
+- `metadata.name` must be identical to `deployment-v1.yaml` — this is what triggers the Recreate replacement of v1
+
+> The file is in [09-lab4-code-snippets.md](09-lab4-code-snippets.md) if you need it.
 
 In another terminal, start watching Pods:
 
@@ -505,7 +662,44 @@ pkill -f "kubectl port-forward"
 Stop-Job -Name *
 ```
 
-### 5.2 — Deploy Blue (v1) and Green (v2) Simultaneously
+### 5.2 — Create the Blue-Green Manifests
+
+Create a directory `k8s/blue-green/` and create three YAML files inside it.
+
+**`blue-deployment.yaml`**
+
+Requirements:
+
+- Named `webapp-blue` (in the `mzinga-lab4` namespace)
+- 3 replicas, image `mzinga-webapp:1.0.0`, `APP_VERSION: "1.0.0"`, `APP_COLOR: "blue"`, `imagePullPolicy: Never`
+- Readiness and liveness probes on `/health`
+- Pod labels must include `app: webapp` **and** `slot: blue`
+
+**`green-deployment.yaml`**
+
+Requirements:
+
+- Named `webapp-green`
+- 3 replicas, image `mzinga-webapp:2.0.0`, `APP_VERSION: "2.0.0"`, `APP_COLOR: "green"`, `imagePullPolicy: Never`
+- Same probes as blue
+- Pod labels must include `app: webapp` **and** `slot: green`
+
+**`service.yaml`**
+
+Requirements:
+
+- Selector must include **both** `app: webapp` **and** `slot: blue`
+- Port mapping: `80` → `8080`
+
+Technical aspects to consider:
+
+- The `slot` label is the switching mechanism. By including it in the Service selector, the Service matches only Pods whose `slot` value matches. Pods from `webapp-blue` carry `slot: blue`; Pods from `webapp-green` carry `slot: green`. At any moment the Service routes traffic to exactly one set of Pods.
+- If the Service selector contained only `app: webapp`, it would match all Pods from both Deployments simultaneously — making this a canary-style split rather than a blue-green switch.
+- The two Deployments use different names (`webapp-blue`, `webapp-green`) and are never modified after creation. The traffic switch is made entirely by patching the Service selector.
+
+> The files are in [09-lab4-code-snippets.md](09-lab4-code-snippets.md) if you need them.
+
+Once all three files are ready, apply them and wait for both Deployments to be ready:
 
 ```sh
 kubectl apply -f k8s/blue-green/blue-deployment.yaml
@@ -648,7 +842,45 @@ pkill -f "kubectl port-forward"
 Stop-Job -Name *
 ```
 
-### 6.2 — Deploy Stable (v1) and Canary (v2)
+### 6.2 — Create the Canary Manifests
+
+Create a directory `k8s/canary/` and create three YAML files inside it.
+
+**`stable-deployment.yaml`**
+
+Requirements:
+
+- Named `webapp-stable`
+- **9 replicas**, image `mzinga-webapp:1.0.0`, `APP_VERSION: "1.0.0"`, `APP_COLOR: "blue"`, `imagePullPolicy: Never`
+- Readiness and liveness probes on `/health`
+- Pod labels must include `app: webapp` and `track: stable`
+
+**`canary-deployment.yaml`**
+
+Requirements:
+
+- Named `webapp-canary`
+- **1 replica**, image `mzinga-webapp:2.0.0`, `APP_VERSION: "2.0.0"`, `APP_COLOR: "green"`, `imagePullPolicy: Never`
+- Same probes as stable
+- Pod labels must include `app: webapp` and `track: canary`
+
+**`service.yaml`**
+
+Requirements:
+
+- Selector must include **only** `app: webapp` — it must **not** include `track`
+- Port mapping: `80` → `8080`
+
+Technical aspects to consider:
+
+- The canary mechanism relies on the Service matching Pods from both Deployments at once. By selecting only `app: webapp`, both `webapp-stable` Pods and `webapp-canary` Pods are included in the Service's endpoint list simultaneously. Traffic is distributed in proportion to the number of ready Pods: with 9 stable + 1 canary, approximately 10% of requests reach the canary.
+- This is the key structural difference from blue-green: the blue-green Service adds a second label (`slot`) to its selector to isolate exactly one Deployment; the canary Service intentionally omits any distinguishing label so both Deployments receive traffic.
+- The `track` label exists on the Pods but is not used by the Service. It is useful for monitoring — `kubectl get pods -l track=canary` shows only the canary Pods — but does not affect routing.
+- The 9:1 replica ratio is what produces the ~10% canary traffic fraction. You will increase this ratio progressively in step 6.5.
+
+> The files are in [09-lab4-code-snippets.md](09-lab4-code-snippets.md) if you need them.
+
+Once all three files are ready, apply them and wait for both Deployments:
 
 ```sh
 kubectl apply -f k8s/canary/service.yaml
