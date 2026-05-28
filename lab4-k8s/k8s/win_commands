@@ -1,0 +1,46 @@
+if ($true) {
+	Start-Job { kubectl port-forward service/webapp 8080:80 -n mzinga-lab4 }
+	Start-Sleep 2
+	curl.exe -s http://localhost:8080/
+}
+
+
+if ($true) {
+	$GREEN_POD = kubectl get pods -n mzinga-lab4 -l slot=green -o jsonpath='{.items[0].metadata.name}'
+	Start-Job {kubectl port-forward pod/$GREEN_POD 8081:8080 -n mzinga-lab4}
+	Start-Sleep 2
+	curl.exe -s http://localhost:8081/
+}
+
+
+
+if ($true) {
+	Start-Job {kubectl port-forward pod/webapp-green-6979594c4c-fcf56 8081:8080 -n mzinga-lab4}
+	Start-Sleep 2
+	curl.exe -s http://localhost:8081/
+}
+
+
+
+kubectl patch service webapp -n mzinga-lab4 ` -p '{\"spec\":{\"selector\":{\"app\":\"webapp\",\"slot\":\"green\"}}}'
+
+if ($true) {
+	$results = @()
+	1..200 | ForEach-Object {
+	$r = curl.exe -s http://localhost:8080/ | ConvertFrom-Json
+	$results += $r.version
+	}
+	$results | Group-Object | Select-Object Count, Name
+}
+
+
+# Initial deploy
+kubectl apply -f k8s/rolling/service.yaml
+kubectl apply -f k8s/rolling/deployment-v1.yaml
+kubectl rollout status deployment/webapp -n mzinga-lab4
+
+# Port-forward
+kubectl port-forward service/webapp 8080:80 -n mzinga-lab4
+
+# Verify v1
+curl.exe -s http://localhost:8080/
