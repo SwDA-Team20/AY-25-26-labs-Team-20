@@ -108,3 +108,4 @@ def delete_all_comms():
 
 if __name__ == "__main__":
     poll()
+    # delete_all_comms()

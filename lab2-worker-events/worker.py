@@ -131,18 +131,6 @@ def update_comm_status(token, comm_id, status):
 	resp.raise_for_status()
 
 
-# TODO: remove
-def get_pending_comms(token):
-	'''Fetches all the communications that have a status set to "pending"'''
-	resp = requests.get(
-		f"{MZINGA_URL}/api/communications",
-		params={"where[status][equals]": "pending", "depth": 1},
-		headers=get_auth_headers(token)
-	)
-	resp.raise_for_status()
-	return resp.json().get("docs", [])
-
-
 def get_doc(token, doc_id):
 	'''Fetches a communications with the given id'''
 	resp = requests.get(
@@ -205,9 +193,7 @@ async def main():
 							continue
 
 						doc = get_doc(token, doc_id)
-						log.info(type(doc))
 						if (doc.get("status") not in ("sent", "processing", "failed")):
-							log.info(doc)
 							process(doc, token)
 						else:
 							log.info(f"Skipping {doc_id} (status: {doc.get("status")})")

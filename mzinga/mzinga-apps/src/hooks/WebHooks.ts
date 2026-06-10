@@ -149,18 +149,37 @@ export class WebHooks {
           };
         })
         .filter(Boolean);
-      originalHooks[hookType] = [].concat(hooks[hookType] || [], hooks);
+    //   originalHooks[hookType] = [].concat(hooks[hookType] || [], hooks);
+	// THIS PREVENTED AFTERCHANGE HOOK FROM BEING CALLED WHEN USING RABBITMQ
+      originalHooks[hookType] = [].concat(originalHooks[hookType] || [], hooks);
     }
     return originalHooks;
   }
   EnrichCollection(
     collectionConfig: CollectionConfig
   ): Partial<CollectionConfig["hooks"]> {
+
+	// TODO: remove
+	 if (collectionConfig.slug === "communications") {
+		console.log(
+		"COMMUNICATIONS HOOKS BEFORE:",
+		collectionConfig.hooks
+		);
+	}
+
     const collectionHooks = this.AddHooksFromList(
       COLLECTION_LEVEL_HOOKS,
       collectionConfig.hooks || {},
       `HOOKSURL_${collectionConfig.slug}`
     );
+
+	 if (collectionConfig.slug === "communications") {
+		console.log(
+		"COMMUNICATIONS HOOKS COUNT AFTER:",
+		collectionHooks.afterChange?.length
+		);
+	}
+
     return collectionHooks;
   }
 }
